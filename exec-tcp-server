@@ -1,0 +1,138 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+{
+    package App;
+    use Fcntl ();
+    use Getopt::Long ();
+    use IO::Handle;
+    use IO::Socket::INET;
+    use POSIX ();
+    use Socket ();
+
+    my $ENV_NAME = "EXEC_TCP_SERVER_PORT";
+
+    sub new {
+        my ($class, %argv) = @_;
+        bless { %argv }, $class;
+    }
+
+    sub run {
+        my ($self, @argv) = @_;
+        $self->parse_options(@argv) or return 1;
+        $self->listen;
+        $self->change_user if $self->{user};
+        $self->exec;
+    }
+
+    sub parse_options {
+        my ($self, @argv) = @_;
+        local @ARGV = @argv;
+
+        my @addr;
+        Getopt::Long::GetOptions(
+            "a|addr=s@" => \@addr,
+            "u|user=s" => \my $user,
+            "h|help"   => sub { $self->show_help; exit 1 },
+        ) or return 0;
+
+        @addr = ('0.0.0.0:80') if !@addr;
+        $self->{addr} = [ map { +{ name => $_ } } @addr ];
+
+        if ($user) {
+            my (undef, undef, $uid, $gid) = getpwnam $user;
+            die "Invalid user $user\n" unless defined $uid;
+            $self->{user} = { name => $user, uid => $uid, gid => $gid };
+        }
+        if (!@ARGV) {
+            warn "Missing argument\n";
+            return 0;
+        }
+        $self->{cmd} = \@ARGV;
+        1;
+    }
+
+    sub show_help {
+        my $self = shift;
+        require Pod::Usage;
+        Pod::Usage::pod2usage(1);
+    }
+
+    sub listen :method {
+        my $self = shift;
+        for my $addr (@{$self->{addr}}) {
+            my $name = $addr->{name};
+            my $socket = IO::Socket::INET->new(
+                LocalAddr => $name,
+                Listen => Socket::SOMAXCONN,
+                Proto => 'tcp',
+                ReuseAddr => 1,
+            ) or die "Failed to listen $name: $!\n";
+            fcntl $socket, Fcntl::F_SETFD, 0 or die;
+            $addr->{socket} = $socket;
+            $addr->{fd} = $socket->fileno;
+        }
+    }
+
+    sub change_user {
+        my $self = shift;
+        my ($uid, $gid) = @{ $self->{user} }{qw(uid gid)};
+        POSIX::setgid($gid) or die "Failed to setgid($gid): $!\n";
+        POSIX::setuid($uid) or die "Failed to setuid($uid): $!\n";
+    }
+
+    sub exec :method {
+        my $self = shift;
+
+        $ENV{$ENV_NAME}
+            = join ";", map { my $addr = $_; "$addr->{name}=$addr->{fd}" } @{ $self->{addr} };
+        my @cmd = @{ $self->{cmd} };
+        exec { $cmd[0] } @cmd;
+        exit 127;
+    }
+}
+
+exit App->new->run(@ARGV);
+
+__END__
+
+=head1 NAME
+
+exec-tcp-server - exec tcp server
+
+=head1 SYNOPSIS
+
+  > exec-tcp-server [options] cmd arg1 arg2 ...
+
+=head1 ARGUMENTS
+
+Commands to be executed.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --addr, -a
+
+Bind address. You can use C<--addr> multiple times.
+
+=item --user, -u
+
+Switch to a user after binding to the addresses.
+
+=item --help, -h
+
+Show this help.
+
+=back
+
+=head1 AUTHOR
+
+Shoichi Kaji
+
+=head1 LICENSE
+
+MIT
+
+=cut
